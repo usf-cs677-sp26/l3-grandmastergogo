@@ -1,0 +1,12 @@
+# Compiled binaries
+bin/
+
+# Test files and directories
+test_storage/
+test_downloads/
+test_file.txt
+large_binary.dat
+*.dat
+
+# macOS
+.DS_Store
