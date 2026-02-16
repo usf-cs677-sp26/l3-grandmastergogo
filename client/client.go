@@ -21,21 +21,30 @@ func put(msgHandler *messages.MessageHandler, fileName string) int {
 		log.Fatalln(err)
 	}
 
-	// Tell the server we want to store this file
-	msgHandler.SendStorageRequest(fileName, uint64(info.Size()))
+	// Calculate checksum before sending
+	file, err := os.Open(fileName)
+	if err != nil {
+		log.Fatalln(err)
+	}
+	md5 := md5.New()
+	io.Copy(md5, file)
+	checksum := md5.Sum(nil)
+	file.Close()
+
+	// Tell the server we want to store this file (with checksum)
+	msgHandler.SendStorageRequest(fileName, uint64(info.Size()), checksum)
 	if ok, _ := msgHandler.ReceiveResponse(); !ok {
 		return 1
 	}
 
-	file, _ := os.Open(fileName)
-	md5 := md5.New()
-	w := io.MultiWriter(msgHandler, md5)
-	io.CopyN(w, file, info.Size()) // Checksum and transfer file at same time
+	// Send the file data
+	file, _ = os.Open(fileName)
+	io.CopyN(msgHandler, file, info.Size())
 	file.Close()
 
-	checksum := md5.Sum(nil)
-	msgHandler.SendChecksumVerification(checksum)
-	if ok, _ := msgHandler.ReceiveResponse(); !ok {
+	// Wait for final acknowledgement from server
+	if ok, msg := msgHandler.ReceiveResponse(); !ok {
+		log.Println("Storage failed:", msg)
 		return 1
 	}
 
@@ -53,27 +62,29 @@ func get(msgHandler *messages.MessageHandler, fileName string) int {
 	}
 
 	msgHandler.SendRetrievalRequest(fileName)
-	ok, _, size := msgHandler.ReceiveRetrievalResponse()
+	ok, _, size, serverCheck := msgHandler.ReceiveRetrievalResponse()
 	if !ok {
+		file.Close()
+		os.Remove(fileName) // Clean up file if retrieval failed
 		return 1
 	}
 
+	// Receive file data and calculate checksum
 	md5 := md5.New()
 	w := io.MultiWriter(file, md5)
 	io.CopyN(w, msgHandler, int64(size))
 	file.Close()
 
+	// Verify checksum against the one received in response
 	clientCheck := md5.Sum(nil)
-	checkMsg, _ := msgHandler.Receive()
-	serverCheck := checkMsg.GetChecksum().Checksum
-
 	if util.VerifyChecksum(serverCheck, clientCheck) {
 		log.Println("Successfully retrieved file.")
+		return 0
 	} else {
 		log.Println("FAILED to retrieve file. Invalid checksum.")
+		os.Remove(fileName) // Remove corrupted file
+		return 1
 	}
-
-	return 0
 }
 
 func main() {

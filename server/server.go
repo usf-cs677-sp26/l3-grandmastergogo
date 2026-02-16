@@ -9,32 +9,70 @@ import (
 	"log"
 	"net"
 	"os"
+	"syscall"
 )
+
+func checkDiskSpace(requiredBytes uint64) bool {
+	var stat syscall.Statfs_t
+	wd, err := os.Getwd()
+	if err != nil {
+		log.Println("Error getting working directory:", err)
+		return false
+	}
+	
+	err = syscall.Statfs(wd, &stat)
+	if err != nil {
+		log.Println("Error checking disk space:", err)
+		return false
+	}
+	
+	// Available space = available blocks * block size
+	availableSpace := stat.Bavail * uint64(stat.Bsize)
+	log.Printf("Available disk space: %d bytes, Required: %d bytes\n", availableSpace, requiredBytes)
+	
+	return availableSpace >= requiredBytes
+}
 
 func handleStorage(msgHandler *messages.MessageHandler, request *messages.StorageRequest) {
 	log.Println("Attempting to store", request.FileName)
+	
+	// Check if file already exists (refuse to overwrite)
+	if _, err := os.Stat(request.FileName); err == nil {
+		msgHandler.SendResponse(false, "File already exists")
+		return
+	}
+	
+	// Check available disk space
+	if !checkDiskSpace(request.Size) {
+		msgHandler.SendResponse(false, "Insufficient disk space")
+		return
+	}
+	
+	// Create file
 	file, err := os.OpenFile(request.FileName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0666)
 	if err != nil {
 		msgHandler.SendResponse(false, err.Error())
-		msgHandler.Close()
 		return
 	}
 
 	msgHandler.SendResponse(true, "Ready for data")
+	
+	// Receive file data and calculate checksum
 	md5 := md5.New()
 	w := io.MultiWriter(file, md5)
-	io.CopyN(w, msgHandler, int64(request.Size)) /* Write and checksum as we go */
+	io.CopyN(w, msgHandler, int64(request.Size))
 	file.Close()
 
 	serverCheck := md5.Sum(nil)
 
-	clientCheckMsg, _ := msgHandler.Receive()
-	clientCheck := clientCheckMsg.GetChecksum().Checksum
-
-	if util.VerifyChecksum(serverCheck, clientCheck) {
+	// Verify checksum against client's checksum from request
+	if util.VerifyChecksum(serverCheck, request.Checksum) {
 		log.Println("Successfully stored file.")
+		msgHandler.SendResponse(true, "File stored successfully")
 	} else {
 		log.Println("FAILED to store file. Invalid checksum.")
+		os.Remove(request.FileName) // Delete corrupted file
+		msgHandler.SendResponse(false, "Checksum verification failed")
 	}
 }
 
@@ -44,19 +82,30 @@ func handleRetrieval(msgHandler *messages.MessageHandler, request *messages.Retr
 	// Get file size and make sure it exists
 	info, err := os.Stat(request.FileName)
 	if err != nil {
-		log.Fatalln(err)
+		log.Println("File not found:", err)
+		msgHandler.SendRetrievalResponse(false, "File not found", 0, nil)
+		return
 	}
 
-	msgHandler.SendRetrievalResponse(true, "Ready to send", uint64(info.Size()))
-
-	file, _ := os.Open(request.FileName)
+	// Calculate checksum before sending
+	file, err := os.Open(request.FileName)
+	if err != nil {
+		log.Println("Error opening file:", err)
+		msgHandler.SendRetrievalResponse(false, "Error opening file", 0, nil)
+		return
+	}
 	md5 := md5.New()
-	w := io.MultiWriter(msgHandler, md5)
-	io.CopyN(w, file, info.Size()) // Checksum and transfer file at same time
+	io.Copy(md5, file)
+	checksum := md5.Sum(nil)
 	file.Close()
 
-	checksum := md5.Sum(nil)
-	msgHandler.SendChecksumVerification(checksum)
+	// Send response with size and checksum
+	msgHandler.SendRetrievalResponse(true, "Ready to send", uint64(info.Size()), checksum)
+
+	// Send file data
+	file, _ = os.Open(request.FileName)
+	io.CopyN(msgHandler, file, info.Size())
+	file.Close()
 }
 
 func handleClient(msgHandler *messages.MessageHandler) {
