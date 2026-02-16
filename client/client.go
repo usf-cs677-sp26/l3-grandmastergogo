@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -32,7 +33,9 @@ func put(msgHandler *messages.MessageHandler, fileName string) int {
 	file.Close()
 
 	// Tell the server we want to store this file (with checksum)
-	msgHandler.SendStorageRequest(fileName, uint64(info.Size()), checksum)
+	// Send only the base filename (no directories allowed per spec)
+	baseName := filepath.Base(fileName)
+	msgHandler.SendStorageRequest(baseName, uint64(info.Size()), checksum)
 	if ok, _ := msgHandler.ReceiveResponse(); !ok {
 		return 1
 	}
@@ -52,20 +55,24 @@ func put(msgHandler *messages.MessageHandler, fileName string) int {
 	return 0
 }
 
-func get(msgHandler *messages.MessageHandler, fileName string) int {
+func get(msgHandler *messages.MessageHandler, fileName string, destDir string) int {
 	fmt.Println("GET", fileName)
 
-	file, err := os.OpenFile(fileName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0666)
+	// Create file in destination directory with base filename
+	baseName := filepath.Base(fileName)
+	outPath := filepath.Join(destDir, baseName)
+	file, err := os.OpenFile(outPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0666)
 	if err != nil {
 		log.Println(err)
 		return 1
 	}
 
-	msgHandler.SendRetrievalRequest(fileName)
+	// Send only basename to server (no directories allowed per spec)
+	msgHandler.SendRetrievalRequest(baseName)
 	ok, _, size, serverCheck := msgHandler.ReceiveRetrievalResponse()
 	if !ok {
 		file.Close()
-		os.Remove(fileName) // Clean up file if retrieval failed
+		os.Remove(outPath) // Clean up file if retrieval failed
 		return 1
 	}
 
@@ -82,7 +89,7 @@ func get(msgHandler *messages.MessageHandler, fileName string) int {
 		return 0
 	} else {
 		log.Println("FAILED to retrieve file. Invalid checksum.")
-		os.Remove(fileName) // Remove corrupted file
+		os.Remove(outPath) // Remove corrupted file
 		return 1
 	}
 }
@@ -122,6 +129,6 @@ func main() {
 	if action == "put" {
 		os.Exit(put(msgHandler, fileName))
 	} else if action == "get" {
-		os.Exit(get(msgHandler, fileName))
+		os.Exit(get(msgHandler, fileName, dir))
 	}
 }
