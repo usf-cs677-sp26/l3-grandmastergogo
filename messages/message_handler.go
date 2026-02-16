@@ -2,6 +2,8 @@ package messages
 
 import (
 	"encoding/binary"
+	"fmt"
+	"io"
 	"log"
 	"net"
 
@@ -20,16 +22,9 @@ func NewMessageHandler(conn net.Conn) *MessageHandler {
 	return m
 }
 
-func (m *MessageHandler) ReadN(buf []byte) error {
-	bytesRead := uint64(0)
-	for bytesRead < uint64(len(buf)) {
-		n, err := m.conn.Read(buf[bytesRead:])
-		if err != nil {
-			return err
-		}
-		bytesRead += uint64(n)
-	}
-	return nil
+func (m *MessageHandler) readN(buf []byte) error {
+	_, err := io.ReadFull(m.conn, buf)
+	return err
 }
 
 func (m *MessageHandler) Read(p []byte) (n int, err error) {
@@ -40,14 +35,13 @@ func (m *MessageHandler) Write(p []byte) (n int, err error) {
 	return m.conn.Write(p)
 }
 
-func (m *MessageHandler) WriteN(buf []byte) error {
-	bytesWritten := uint64(0)
-	for bytesWritten < uint64(len(buf)) {
-		n, err := m.conn.Write(buf[bytesWritten:])
+func (m *MessageHandler) writeN(buf []byte) error {
+	for len(buf) > 0 {
+		n, err := m.conn.Write(buf)
 		if err != nil {
 			return err
 		}
-		bytesWritten += uint64(n)
+		buf = buf[n:]
 	}
 	return nil
 }
@@ -60,23 +54,30 @@ func (m *MessageHandler) Send(wrapper *Wrapper) error {
 
 	prefix := make([]byte, 8)
 	binary.LittleEndian.PutUint64(prefix, uint64(len(serialized)))
-	m.WriteN(prefix)
-	m.WriteN(serialized)
-
-	return nil
+	if err := m.writeN(prefix); err != nil {
+		return err
+	}
+	return m.writeN(serialized)
 }
 
 func (m *MessageHandler) Receive() (*Wrapper, error) {
 	prefix := make([]byte, 8)
-	m.ReadN(prefix)
+	if err := m.readN(prefix); err != nil {
+		return nil, err
+	}
 
 	payloadSize := binary.LittleEndian.Uint64(prefix)
-	payload := make([]byte, payloadSize)
-	m.ReadN(payload)
+	if payloadSize > (1 << 30) { // sanity limit: 1GiB
+		return nil, fmt.Errorf("message too large: %d bytes", payloadSize)
+	}
+
+	payload := make([]byte, int(payloadSize))
+	if err := m.readN(payload); err != nil {
+		return nil, err
+	}
 
 	wrapper := &Wrapper{}
-	err := proto.Unmarshal(payload, wrapper)
-	return wrapper, err
+	return wrapper, proto.Unmarshal(payload, wrapper)
 }
 
 func (m *MessageHandler) Close() {
