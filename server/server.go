@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"syscall"
 )
 
@@ -35,6 +36,12 @@ func checkDiskSpace(requiredBytes uint64) bool {
 
 func handleStorage(msgHandler *messages.MessageHandler, request *messages.StorageRequest) {
 	log.Println("Attempting to store", request.FileName)
+	
+	// Reject filenames with path separators (no directories allowed)
+	if strings.Contains(request.FileName, "/") || strings.Contains(request.FileName, "\\") {
+		msgHandler.SendResponse(false, "Filename cannot contain path separators")
+		return
+	}
 	
 	// Check if file already exists (refuse to overwrite)
 	if _, err := os.Stat(request.FileName); err == nil {
@@ -79,6 +86,12 @@ func handleStorage(msgHandler *messages.MessageHandler, request *messages.Storag
 func handleRetrieval(msgHandler *messages.MessageHandler, request *messages.RetrievalRequest) {
 	log.Println("Attempting to retrieve", request.FileName)
 
+	// Reject filenames with path separators (no directories allowed)
+	if strings.Contains(request.FileName, "/") || strings.Contains(request.FileName, "\\") {
+		msgHandler.SendRetrievalResponse(false, "Filename cannot contain path separators", 0, nil)
+		return
+	}
+
 	// Get file size and make sure it exists
 	info, err := os.Stat(request.FileName)
 	if err != nil {
@@ -111,26 +124,24 @@ func handleRetrieval(msgHandler *messages.MessageHandler, request *messages.Retr
 func handleClient(msgHandler *messages.MessageHandler) {
 	defer msgHandler.Close()
 
-	for {
-		wrapper, err := msgHandler.Receive()
-		if err != nil {
-			log.Println(err)
-		}
-
-		switch msg := wrapper.Msg.(type) {
-		case *messages.Wrapper_StorageReq:
-			handleStorage(msgHandler, msg.StorageReq)
-			continue
-		case *messages.Wrapper_RetrievalReq:
-			handleRetrieval(msgHandler, msg.RetrievalReq)
-			continue
-		case nil:
-			log.Println("Received an empty message, terminating client")
-			return
-		default:
-			log.Printf("Unexpected message type: %T", msg)
-		}
+	// Handle one request then disconnect (per lab spec)
+	wrapper, err := msgHandler.Receive()
+	if err != nil {
+		log.Println("Error receiving message:", err)
+		return
 	}
+
+	switch msg := wrapper.Msg.(type) {
+	case *messages.Wrapper_StorageReq:
+		handleStorage(msgHandler, msg.StorageReq)
+	case *messages.Wrapper_RetrievalReq:
+		handleRetrieval(msgHandler, msg.RetrievalReq)
+	case nil:
+		log.Println("Received an empty message")
+	default:
+		log.Printf("Unexpected message type: %T", msg)
+	}
+	// Connection closed via defer when function returns
 }
 
 func main() {
@@ -150,6 +161,10 @@ func main() {
 	dir := "."
 	if len(os.Args) >= 3 {
 		dir = os.Args[2]
+	}
+	// Make sure storage directory exists
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Fatalln("Failed to create storage directory:", err)
 	}
 	if err := os.Chdir(dir); err != nil {
 		log.Fatalln(err)
