@@ -60,19 +60,34 @@ func (m *MessageHandler) Send(wrapper *Wrapper) error {
 
 	prefix := make([]byte, 8)
 	binary.LittleEndian.PutUint64(prefix, uint64(len(serialized)))
-	m.WriteN(prefix)
-	m.WriteN(serialized)
+	// error handling to allow callers to handle network errors correctly.
+	if err := m.WriteN(prefix); err != nil {
+		return err
+	}
+
+	// error propagation for payload write to prevent partial message sends going unnoticed.
+	if err := m.WriteN(serialized); err != nil {
+		return err
+	}
 
 	return nil
 }
 
 func (m *MessageHandler) Receive() (*Wrapper, error) {
 	prefix := make([]byte, 8)
-	m.ReadN(prefix)
+
+	// Propagate read failures when reading the length header.
+	if err := m.ReadN(prefix); err != nil {
+		return nil, err
+	}
 
 	payloadSize := binary.LittleEndian.Uint64(prefix)
 	payload := make([]byte, payloadSize)
-	m.ReadN(payload)
+
+	// Propagate read failures when reading the payload bytes.
+	if err := m.ReadN(payload); err != nil {
+		return nil, err
+	}
 
 	wrapper := &Wrapper{}
 	err := proto.Unmarshal(payload, wrapper)
@@ -83,8 +98,9 @@ func (m *MessageHandler) Close() {
 	m.conn.Close()
 }
 
-func (m *MessageHandler) SendStorageRequest(fileName string, size uint64) error {
-	msg := StorageRequest{FileName: fileName, Size: size}
+func (m *MessageHandler) SendStorageRequest(fileName string, size uint64, checksum []byte) error {
+	// Include checksum in the storage request so the server can verify integrity after upload.
+	msg := StorageRequest{FileName: fileName, Size: size, Checksum: checksum}
 	wrapper := &Wrapper{
 		Msg: &Wrapper_StorageReq{StorageReq: &msg},
 	}
@@ -112,13 +128,13 @@ func (m *MessageHandler) SendResponse(ok bool, str string) error {
 	wrapper := &Wrapper{
 		Msg: &Wrapper_Response{Response: &msg},
 	}
-
 	return m.Send(wrapper)
 }
 
-func (m *MessageHandler) SendRetrievalResponse(ok bool, str string, size uint64) error {
+func (m *MessageHandler) SendRetrievalResponse(ok bool, str string, size uint64, checksum []byte) error {
+	// Include checksum in retrieval response so the client can verify downloaded file integrity.
 	resp := Response{Ok: ok, Message: str}
-	msg := RetrievalResponse{Resp: &resp, Size: size}
+	msg := RetrievalResponse{Resp: &resp, Size: size, Checksum: checksum}
 	wrapper := &Wrapper{
 		Msg: &Wrapper_RetrievalResp{RetrievalResp: &msg},
 	}
@@ -136,13 +152,16 @@ func (m *MessageHandler) ReceiveResponse() (bool, string) {
 	return resp.GetResponse().Ok, resp.GetResponse().Message
 }
 
-func (m *MessageHandler) ReceiveRetrievalResponse() (bool, string, uint64) {
+func (m *MessageHandler) ReceiveRetrievalResponse() (bool, string, uint64, []byte) {
 	resp, err := m.Receive()
 	if err != nil {
-		return false, "", 0
+		// Return nil checksum on failure to keep return values consistent/safe for callers.
+		return false, "", 0, nil
 	}
 
 	rr := resp.GetRetrievalResp().GetResp()
 	log.Println(rr.Message)
-	return rr.Ok, rr.Message, resp.GetRetrievalResp().Size
+
+	// Return checksum along with status/message/size so callers can validate retrieved file contents.
+	return rr.Ok, rr.Message, resp.GetRetrievalResp().Size, resp.GetRetrievalResp().Checksum
 }
