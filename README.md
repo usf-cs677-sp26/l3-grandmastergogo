@@ -59,11 +59,14 @@ make
 4. **Message Handler**: Fixed type safety issues (uint64→int), used `io.ReadFull`
 
 ## Compatibility
-Agreed upon a single `.proto` with teammate (Sufiyan Shaikh).
+Verified full compatibility with teammate Sufiyan Shaikh's implementation:
+- **Identical** `.proto` files (same message structures and field numbers)
+- **Matching** message handler function signatures
+- **Same** checksum flow (sent in initial request/response metadata)
+- **Compatible** wire protocol (8-byte little-endian length prefix)
 
 This implementation places checksums in request/response metadata (not as separate trailing messages) and uses **MD5** for integrity verification.
 
 ### Cross-compatibility
-- Both implementations use the same `StorageRequest` and `RetrievalResponse` format
-- Checksums sent upfront in control messages (per lab spec)
-- Compatible with any client/server following the agreed protocol
+- My client works with Sufiyan's server
+- Sufiyan's client works with my server
